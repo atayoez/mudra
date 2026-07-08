@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """mudra — control your mouse with hand gestures via a webcam.
 
-A webcam "air-mouse" for Linux/Wayland. A YOLO11 hand-pose model (21 keypoints,
-GPU via PyTorch/CUDA) tracks your hand; the cursor and clicks are injected through
-an evdev/uinput virtual mouse, so it works natively on Wayland (where X11 tools
-like xdotool/pyautogui can't move the real cursor).
+A webcam "air-mouse" for Linux/Wayland. MediaPipe hand models (21 keypoints)
+run through OpenCV's dnn module track your hand; the cursor and clicks are
+injected through an evdev/uinput virtual mouse, so it works natively on
+Wayland (where X11 tools like xdotool/pyautogui can't move the real cursor).
 
 Gestures:
   move        : point with your index finger (the fingertip is the cursor)
@@ -14,10 +14,10 @@ Gestures:
                 open your hand to drop (great for moving windows/objects)
 
 Hotkeys (read globally via evdev, so they work regardless of window focus):
-  q / Esc quit · p pause · c re-home cursor   (Ctrl+C also quits)
+  q / Esc quit · p pause   (Ctrl+C also quits)
 
-Why YOLO and not MediaPipe: MediaPipe Hands ships no wheel for Python 3.13 /
-aarch64, so this uses an Ultralytics YOLO11n-pose hand model on the GPU instead.
+No pip, no venv, no PyTorch: the models are small ONNX files executed by the
+distro's python3-opencv. See mp_hand.py.
 """
 from __future__ import annotations
 
@@ -25,11 +25,10 @@ import argparse
 import math
 import os
 import pathlib
-import re
 import select
 import signal
-import subprocess
 import sys
+import threading
 import time
 from collections import deque
 
@@ -40,7 +39,8 @@ from PyQt6.QtGui import QImage, QPainter, QColor, QFont
 from PyQt6.QtWidgets import QApplication, QWidget
 
 HERE = pathlib.Path(__file__).resolve().parent
-DEFAULT_MODEL = HERE / "hand_yolo11n_pose.pt"
+PALM_MODEL = HERE / "palm_detection_mediapipe_2023feb.onnx"
+HAND_MODEL = HERE / "handpose_estimation_mediapipe_2023feb.onnx"
 
 # 21-keypoint hand layout (MediaPipe convention)
 WRIST, THUMB_TIP, INDEX_MCP, INDEX_TIP = 0, 4, 5, 8
@@ -88,16 +88,27 @@ class OneEuro:
 
 
 # ---------------------------------------------------------------------------
-# Virtual mouse via evdev/uinput. Absolute positioning is emulated with relative
-# events while we keep an internal model of the cursor; we "home" to (0,0) once
-# so the model matches reality.
+# Virtual mouse via evdev/uinput: a tablet-style *absolute* pointer (ABS_X/
+# ABS_Y over a normalized 0..65535 range, like QEMU's usb-tablet). The
+# compositor maps that range to the whole desktop, so no screen-size
+# detection, no homing, no drift.
 # ---------------------------------------------------------------------------
 class VirtualMouse:
-    def __init__(self, screen_w, screen_h):
-        from evdev import UInput, ecodes as e
+    RANGE = 65535
+
+    def __init__(self):
+        from evdev import AbsInfo, UInput, ecodes as e
         self.e = e
         cap = {
-            e.EV_REL: [e.REL_X, e.REL_Y, e.REL_WHEEL],
+            e.EV_ABS: [
+                (e.ABS_X, AbsInfo(value=self.RANGE // 2, min=0,
+                                  max=self.RANGE, fuzz=0, flat=0,
+                                  resolution=0)),
+                (e.ABS_Y, AbsInfo(value=self.RANGE // 2, min=0,
+                                  max=self.RANGE, fuzz=0, flat=0,
+                                  resolution=0)),
+            ],
+            e.EV_REL: [e.REL_WHEEL],
             e.EV_KEY: [e.BTN_LEFT, e.BTN_RIGHT, e.BTN_MIDDLE],
         }
         try:
@@ -107,27 +118,15 @@ class VirtualMouse:
                 f"Cannot open /dev/uinput ({exc}).\n"
                 "Run ./setup.sh first (adds a udev rule + puts you in the "
                 "'input' group), then launch via ./run.sh.")
-        self.sw, self.sh = screen_w, screen_h
         self.pos = np.array([0.5, 0.5])
-        self.home()
-
-    def _emit(self, dx, dy):
-        dx, dy = int(round(dx)), int(round(dy))
-        if dx:
-            self.ui.write(self.e.EV_REL, self.e.REL_X, dx)
-        if dy:
-            self.ui.write(self.e.EV_REL, self.e.REL_Y, dy)
-        if dx or dy:
-            self.ui.syn()
-
-    def home(self):
-        self._emit(-5 * self.sw, -5 * self.sh)
-        self.pos = np.array([0.0, 0.0])
 
     def move_to(self, target_norm):
         target = np.clip(target_norm, 0.0, 1.0)
-        self._emit((target[0] - self.pos[0]) * self.sw,
-                   (target[1] - self.pos[1]) * self.sh)
+        self.ui.write(self.e.EV_ABS, self.e.ABS_X,
+                      int(round(target[0] * self.RANGE)))
+        self.ui.write(self.e.EV_ABS, self.e.ABS_Y,
+                      int(round(target[1] * self.RANGE)))
+        self.ui.syn()
         self.pos = target
 
     def _btn(self, button):
@@ -177,8 +176,7 @@ class KeyListener:
                     d.close()
             except Exception:
                 pass
-        self.kmap = {ecodes.KEY_Q: "q", ecodes.KEY_ESC: "q", ecodes.KEY_P: "p",
-                     ecodes.KEY_C: "c"}
+        self.kmap = {ecodes.KEY_Q: "q", ecodes.KEY_ESC: "q", ecodes.KEY_P: "p"}
 
     def poll(self):
         out = []
@@ -205,39 +203,6 @@ class KeyListener:
 
 
 # ---------------------------------------------------------------------------
-# Screen size detection (KDE / wlroots), overridable with --screen.
-# ---------------------------------------------------------------------------
-def detect_screen_size(override):
-    """Return the *logical* desktop size (what the cursor uses), which differs
-    from the physical mode under fractional scaling (e.g. 3440x1440 physical ->
-    2752x1152 logical at 1.25x)."""
-    if override:
-        m = re.match(r"(\d+)x(\d+)$", override)
-        if m:
-            return int(m.group(1)), int(m.group(2))
-    ansi = re.compile(r"\x1b\[[0-9;]*m")
-    errs = (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired)
-    try:  # KDE: "Geometry:" is logical; "Modes:" is physical
-        out = ansi.sub("", subprocess.check_output(
-            ["kscreen-doctor", "-o"], text=True, stderr=subprocess.DEVNULL,
-            timeout=3))
-        m = re.search(r"Geometry:\s*\d+,\d+\s+(\d+)x(\d+)", out)
-        if m:
-            return int(m.group(1)), int(m.group(2))
-    except errs:
-        pass
-    try:  # wlroots compositors (Sway, Hyprland, ...)
-        out = subprocess.check_output(["wlr-randr"], text=True,
-                                      stderr=subprocess.DEVNULL, timeout=3)
-        m = re.search(r"(\d{3,5})x(\d{3,5})", out)
-        if m:
-            return int(m.group(1)), int(m.group(2))
-    except errs:
-        pass
-    return 1920, 1080
-
-
-# ---------------------------------------------------------------------------
 # Hand geometry helpers
 # ---------------------------------------------------------------------------
 def _dist(a, b):
@@ -257,13 +222,95 @@ def _curled_count(kp):
 
 
 # ---------------------------------------------------------------------------
+# Threaded camera: a grabber thread always keeps only the *newest* frame, so
+# the processing loop never blocks on the camera and never works on a stale
+# queued frame (V4L2/GStreamer buffer one or more frames otherwise — that's
+# pure cursor latency).
+# ---------------------------------------------------------------------------
+class Camera:
+    def __init__(self, index):
+        import cv2
+        self.cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
+        if not self.cap.isOpened():            # fall back to any backend
+            self.cap = cv2.VideoCapture(index)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        self.ok = self.cap.isOpened()
+        self._lock = threading.Lock()
+        self._frame = None
+        self._seq = 0
+        self._taken = 0
+        self._run = True
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        if self.ok:
+            self._thread.start()
+
+    def _loop(self):
+        while self._run:
+            ok, f = self.cap.read()
+            if not ok:
+                time.sleep(0.01)
+                continue
+            with self._lock:
+                self._frame, self._seq = f, self._seq + 1
+
+    def latest(self):
+        """The newest frame, or None if it was already handed out."""
+        with self._lock:
+            if self._frame is None or self._seq == self._taken:
+                return None
+            self._taken = self._seq
+            return self._frame
+
+    def release(self):
+        self._run = False
+        if self._thread.is_alive():
+            self._thread.join(timeout=1.0)
+        self.cap.release()
+
+
+# ---------------------------------------------------------------------------
+# Hand tracking: MediaPipe palm-detection + hand-landmark ONNX models via
+# OpenCV dnn (see mp_hand.py). Like the real MediaPipe pipeline, the palm
+# detector only runs to (re)acquire the hand; while tracking, each frame's
+# crop is derived from the previous frame's landmarks (~2x faster).
+# ---------------------------------------------------------------------------
+class HandTracker:
+    def __init__(self, palm_model, hand_model, conf):
+        from mp_hand import MPPalmDet, MPHandPose, palm_from_landmarks
+        self._palm_from_landmarks = palm_from_landmarks
+        self.detector = MPPalmDet(str(palm_model))
+        self.landmarker = MPHandPose(str(hand_model), conf_threshold=conf)
+        self._palm = None
+
+    def __call__(self, frame):
+        """Return (kp, conf) — 21 (x, y) landmarks + confidence — or None."""
+        if self._palm is not None:
+            r = self.landmarker.infer(frame, self._palm)
+            if r is not None:
+                self._palm = self._palm_from_landmarks(r[0])
+                return r
+            self._palm = None
+        palms = self.detector.infer(frame)
+        if len(palms) == 0:
+            return None
+        i = int(np.argmax((palms[:, 2] - palms[:, 0])
+                          * (palms[:, 3] - palms[:, 1])))   # largest palm
+        r = self.landmarker.infer(frame, palms[i])
+        if r is not None:
+            self._palm = self._palm_from_landmarks(r[0])
+        return r
+
+
+# ---------------------------------------------------------------------------
 # The app: a small preview window driven by a QTimer.
 # ---------------------------------------------------------------------------
 class HandMouse(QWidget):
-    def __init__(self, model, cap, mouse, keys, args, sw, sh):
+    def __init__(self, model, cap, mouse, keys, args):
         super().__init__()
         self.model, self.cap, self.mouse, self.keys = model, cap, mouse, keys
-        self.args, self.sw, self.sh = args, sw, sh
+        self.args = args
         self.fx = OneEuro(mincutoff=args.mincutoff, beta=args.beta)
         self.fy = OneEuro(mincutoff=args.mincutoff, beta=args.beta)
         self._hist = deque(maxlen=max(1, args.median))  # cursor outlier rejection
@@ -305,12 +352,8 @@ class HandMouse(QWidget):
                 self.paused = not self.paused
                 if self.paused:
                     self._release_left()
-                else:
-                    self.mouse.home()
-            elif k == "c":
-                self.mouse.home()
-        ok, frame = self.cap.read()
-        if not ok:
+        frame = self.cap.latest()
+        if frame is None:
             return
         now = time.monotonic()
         dt = now - self._last
@@ -318,16 +361,12 @@ class HandMouse(QWidget):
         if dt > 0:
             self.fps = 0.9 * self.fps + 0.1 / dt
 
-        r = self.model(frame, imgsz=self.args.imgsz, half=self.args.half,
-                       device=self.args.device, verbose=False)[0]
+        r = self.model(frame)
         kp = None
-        if r.boxes is not None and len(r.boxes) > 0:
+        if r is not None:
             self._miss = 0
-            i = int(np.argmax((r.boxes.xywh[:, 2] * r.boxes.xywh[:, 3])
-                              .cpu().numpy()))            # largest hand
-            kp = r.keypoints.xy[i].cpu().numpy()
-            conf = (r.keypoints.conf[i].cpu().numpy()
-                    if r.keypoints.conf is not None else np.ones(len(kp)))
+            kp, hand_conf = r
+            conf = np.full(len(kp), hand_conf)
             self._handle_hand(kp, conf, frame.shape, now)
         else:
             self._miss += 1
@@ -477,18 +516,18 @@ class HandMouse(QWidget):
 def build_args():
     p = argparse.ArgumentParser(description="mudra — hand-gesture air-mouse.")
     p.add_argument("--camera", type=int, default=0)
-    p.add_argument("--screen", default=None, help="WxH override, e.g. 2560x1440")
-    p.add_argument("--model", default=str(DEFAULT_MODEL))
-    p.add_argument("--imgsz", type=int, default=512,
-                   help="YOLO input size (larger = more accurate keypoints)")
+    p.add_argument("--conf", type=float, default=0.8,
+                   help="hand confidence threshold (lower = keeps tracking "
+                        "harder poses, more false positives)")
     p.add_argument("--margin", type=float, default=0.15,
                    help="frame edge fraction mapped outside the screen")
     p.add_argument("--pinch", type=float, default=0.62,
                    help="pinch close threshold (dist/hand-scale); higher = easier")
     p.add_argument("--no-grab", dest="grab", action="store_false", default=True,
                    help="disable fist-to-grab dragging")
-    p.add_argument("--median", type=int, default=5,
-                   help="frames of median filtering (rejects keypoint jumps)")
+    p.add_argument("--median", type=int, default=3,
+                   help="frames of median filtering (rejects keypoint jumps; "
+                        "more = steadier but laggier)")
     p.add_argument("--mincutoff", type=float, default=1.0,
                    help="One-Euro: lower = smoother/steadier when holding still")
     p.add_argument("--beta", type=float, default=0.05,
@@ -498,37 +537,31 @@ def build_args():
 
 def main():
     args = build_args()
-    if not os.path.exists(args.model):
-        sys.exit(f"Missing hand model: {args.model}\nRun ./setup.sh to fetch it.")
-    import cv2
-    import torch
-    from ultralytics import YOLO
+    for m in (PALM_MODEL, HAND_MODEL):
+        if not m.exists():
+            sys.exit(f"Missing hand model: {m}\nRun ./setup.sh to fetch it.")
 
-    use_cuda = torch.cuda.is_available()
-    args.device = 0 if use_cuda else "cpu"
-    args.half = use_cuda                       # FP16 only helps on GPU
-    sw, sh = detect_screen_size(args.screen)
-    print(f"Screen(logical): {sw}x{sh}  device={'cuda' if use_cuda else 'cpu'}  "
-          f"model={pathlib.Path(args.model).name}")
-    model = YOLO(args.model)
+    print("inference=OpenCV-dnn (CPU)  pointer=absolute (uinput tablet)")
+    model = HandTracker(PALM_MODEL, HAND_MODEL, args.conf)
 
-    cap = cv2.VideoCapture(args.camera)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-    if not cap.isOpened():
+    cap = Camera(args.camera)
+    if not cap.ok:
         sys.exit(f"Cannot open camera {args.camera}.")
-    for _ in range(3):           # warm up the inference graph
-        ok, f = cap.read()
-        if ok:
-            model(f, imgsz=args.imgsz, half=args.half, device=args.device,
-                  verbose=False)
+    warm, deadline = 0, time.monotonic() + 5.0
+    while warm < 3 and time.monotonic() < deadline:
+        f = cap.latest()
+        if f is None:
+            time.sleep(0.005)
+            continue
+        model(f)                 # warm up the inference graph
+        warm += 1
 
     app = QApplication(sys.argv)
     keys = KeyListener()
     if not keys.devs:
         print("WARNING: no readable keyboard via evdev; use Ctrl+C to quit.")
-    mouse = VirtualMouse(sw, sh)
-    win = HandMouse(model, cap, mouse, keys, args, sw, sh)  # noqa: F841
+    mouse = VirtualMouse()
+    win = HandMouse(model, cap, mouse, keys, args)  # noqa: F841
     signal.signal(signal.SIGINT, lambda *_: win.quit())
     print("mudra running. Point with your index finger; pinch to click; "
           "fist to grab.")

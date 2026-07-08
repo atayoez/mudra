@@ -2,11 +2,12 @@
 
 **Control your mouse with hand gestures, using just a webcam.**
 
-`mudra` is a webcam "air-mouse" for Linux/Wayland. A YOLO11 hand-pose model
-tracks your hand in real time and drives the system cursor: point to move,
-pinch to click, make a fist to grab and drag. Cursor and clicks are injected
-through a virtual `evdev`/`uinput` device, so it works **natively on Wayland**
-(where X11 tools like `xdotool`/`pyautogui` can't move the real cursor).
+`mudra` is a webcam "air-mouse" for Linux/Wayland. MediaPipe hand models
+(21 keypoints, run by OpenCV — no PyTorch, no pip) track your hand in real
+time and drive the system cursor: point to move, pinch to click, make a fist
+to grab and drag. Cursor and clicks are injected through a virtual
+`evdev`/`uinput` device, so it works **natively on Wayland** (where X11 tools
+like `xdotool`/`pyautogui` can't move the real cursor).
 
 > The name comes from *mudrā* — a symbolic hand gesture/pose.
 
@@ -20,23 +21,23 @@ through a virtual `evdev`/`uinput` device, so it works **natively on Wayland**
 | ✊ make a **fist** | grab & move — holds left button, move your fist to drag, open your hand to drop |
 
 Hotkeys (read globally from the keyboard, so they work regardless of window
-focus): **`q`/`Esc`** quit · **`p`** pause · **`c`** re-home cursor · `Ctrl+C` quits.
+focus): **`q`/`Esc`** quit · **`p`** pause · `Ctrl+C` quits.
 
-## Why YOLO instead of MediaPipe
+## No pip, no venv, no PyTorch
 
-MediaPipe Hands — the usual webcam hand tracker — ships **no wheel for Python
-3.13 / aarch64**. `mudra` instead runs an [Ultralytics YOLO11n-pose hand
-model](https://docs.ultralytics.com/datasets/pose/hand-keypoints/) (21 keypoints)
-through PyTorch, on the **GPU** when one is available (CUDA), or CPU otherwise.
+Everything runs on **distro packages alone**: the MediaPipe palm-detection and
+hand-landmark models (two ONNX files, ~8 MB total, from the [OpenCV Model
+Zoo](https://github.com/opencv/opencv_zoo)) are executed by your distro's
+`python3-opencv` via `cv2.dnn`. Real-time on CPU (~15–30 ms/frame) — no GPU
+needed. This also avoids the MediaPipe pip package entirely, which ships no
+wheel for Python 3.13 / aarch64.
 
 ## Requirements
 
 - Linux on Wayland, any distro. `setup.sh` knows the package names for
   openSUSE, Debian/Ubuntu, Fedora and Arch; others need a one-time manual
-  package install. Built and tested on openSUSE Tumbleweed (KDE Plasma,
-  Wayland, aarch64) with an NVIDIA GPU, but nothing is Blackwell-specific.
-- Python 3.11+ (3.13 supported), a webcam, and access to `/dev/uinput`.
-- Optional: an NVIDIA GPU for ~30–45 fps; CPU works but slower.
+  package install.
+- Python 3, a webcam, and access to `/dev/uinput`.
 
 ## Install
 
@@ -47,13 +48,13 @@ cd mudra
 ```
 
 One script does everything: system packages + `/dev/uinput` access (elevating
-itself with `pkexec`/`sudo` — asks for your password), then the Python venv
-(PyTorch + Ultralytics) and the hand model (~6 MB) as your user.
+itself with `pkexec`/`sudo` — asks for your password), then the two hand
+models (~8 MB) as your user.
 
 `setup.sh` supports openSUSE (`zypper`), Debian/Ubuntu (`apt`), Fedora (`dnf`)
 and Arch (`pacman`). On other distros install the equivalents manually
-(python3 + venv, OpenCV python bindings, NumPy, python-evdev, PyQt6, the Qt6
-Wayland plugin), then re-run `setup.sh` — it still sets up the udev rule and
+(python3, OpenCV python bindings, NumPy, python-evdev, PyQt6, the Qt6 Wayland
+plugin), then re-run `setup.sh` — it still sets up the udev rule and
 `/dev/uinput` access.
 
 ## Run
@@ -72,35 +73,45 @@ the cursor.
 ./run.sh --margin 0.1     # bigger active box (less arm travel, less jitter)
 ./run.sh --mincutoff 0.7  # smoother/steadier cursor (a touch more lag)
 ./run.sh --beta 0.09      # snappier on fast moves
-./run.sh --median 3       # less smoothing lag (3 instead of 5 frames)
-./run.sh --imgsz 640      # more accurate keypoints (slower)
+./run.sh --median 5       # steadier cursor (more smoothing lag)
+./run.sh --conf 0.6       # keep tracking harder hand poses (more false hits)
 ./run.sh --no-grab        # disable fist-to-grab
-./run.sh --screen 2560x1440   # override detected screen size
 ```
 
 ## How it works
 
 ```
-webcam ─▶ YOLO11n-pose (21 hand keypoints, GPU)
+webcam ─▶ MediaPipe palm detection + hand landmarks (21 keypoints,
+          two ONNX models via OpenCV dnn, CPU)
        ─▶ gesture logic: index fingertip → cursor;
           thumb–finger pinch distances → clicks; curled fingers → fist-grab
        ─▶ median filter + One-Euro smoothing
-       ─▶ evdev/uinput virtual mouse (relative events + internal absolute model)
+       ─▶ evdev/uinput virtual tablet (absolute pointer events)
 ```
+
+- **Tracking, not just detecting:** like the real MediaPipe pipeline, the palm
+  detector only runs to (re)acquire the hand; while tracking, each frame's
+  crop comes from the previous frame's landmarks (~2× faster).
+- **Low latency:** a capture thread always keeps only the *newest* camera
+  frame, so the processing loop never blocks on the camera and never works on
+  a stale buffered frame.
 
 - **Smoothing:** a short median filter rejects single-frame keypoint flicker,
   then a [One-Euro filter](https://gery.casiez.net/1euro/) smooths the residual
   tremor — low jitter when holding still, low lag on fast moves.
 - **Pinch detection** normalizes thumb-to-finger distance by a rotation-stable
   hand scale, with hysteresis and median smoothing for reliable clicks.
-- **Wayland cursor:** an absolute position is emulated with relative `uinput`
-  events plus an internal model of the cursor, "homed" to (0,0) once.
+- **Wayland cursor:** the virtual `uinput` device is a tablet-style *absolute*
+  pointer (`ABS_X`/`ABS_Y` over a normalized range, like QEMU's usb-tablet),
+  so the compositor maps it to the desktop directly — no screen-size
+  detection, no drift.
 
 ## Credits & license
 
-- Hand-pose model: [chrismuntean/YOLO11n-pose-hands](https://github.com/chrismuntean/YOLO11n-pose-hands)
-  (trained on Ultralytics' hand-keypoints dataset).
-- Inference: [Ultralytics YOLO](https://github.com/ultralytics/ultralytics).
+- Hand models: MediaPipe palm-detection & hand-landmark ONNX from the
+  [OpenCV Model Zoo](https://github.com/opencv/opencv_zoo) (Apache-2.0);
+  `mp_hand.py` adapts the zoo's reference pre/post-processing.
+- Originals: [Google MediaPipe](https://github.com/google-ai-edge/mediapipe)
+  (Apache-2.0).
 
-Both Ultralytics and the model are **AGPL-3.0**, so this project is licensed
-**AGPL-3.0** as well. See [LICENSE](LICENSE).
+`mudra` itself is licensed **AGPL-3.0** — see [LICENSE](LICENSE).

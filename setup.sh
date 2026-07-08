@@ -2,8 +2,8 @@
 # One-shot setup for mudra. Run as your regular user:
 #     ./setup.sh
 # It elevates itself (pkexec/sudo) for the system phase — packages +
-# /dev/uinput access — then creates the Python venv and fetches the
-# hand-pose model as your user.
+# /dev/uinput access — then downloads the hand-tracking ONNX models as
+# your user. No pip, no venv: everything runs on distro packages.
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -11,8 +11,8 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # System phase (root). Invoked automatically by the user phase below.
 #
 # Supports zypper (openSUSE), apt (Debian/Ubuntu), dnf (Fedora) and
-# pacman (Arch). On anything else, install the equivalents of: python3 + pip
-# + venv, OpenCV python bindings, NumPy, python-evdev, PyQt6, the Qt6 Wayland
+# pacman (Arch). On anything else, install the equivalents of: python3,
+# OpenCV python bindings, NumPy, python-evdev, PyQt6, the Qt6 Wayland
 # platform plugin — the /dev/uinput setup below runs regardless.
 # ---------------------------------------------------------------------------
 if [ "${1:-}" = "--system" ]; then
@@ -24,24 +24,24 @@ if [ "${1:-}" = "--system" ]; then
     echo "== Installing system packages =="
     if command -v zypper >/dev/null; then
         zypper --non-interactive install --no-recommends \
-            python3 python3-pip python3-opencv python3-numpy \
+            python3 python3-opencv python3-numpy \
             python3-evdev python3-PyQt6 qt6-wayland
     elif command -v apt-get >/dev/null; then
         apt-get update
         apt-get install -y --no-install-recommends \
-            python3 python3-pip python3-venv python3-opencv python3-numpy \
+            python3 python3-opencv python3-numpy \
             python3-evdev python3-pyqt6 qt6-wayland
     elif command -v dnf >/dev/null; then
         dnf install -y \
-            python3 python3-pip python3-opencv python3-numpy \
+            python3 python3-opencv python3-numpy \
             python3-evdev python3-pyqt6 qt6-qtwayland
     elif command -v pacman >/dev/null; then
         pacman -S --needed --noconfirm \
-            python python-pip python-opencv python-numpy \
+            python python-opencv python-numpy \
             python-evdev python-pyqt6 qt6-wayland
     else
         echo "!! No supported package manager found (zypper/apt/dnf/pacman)."
-        echo "   Install manually: python3 + pip + venv, OpenCV python bindings,"
+        echo "   Install manually: python3, OpenCV python bindings,"
         echo "   NumPy, python-evdev, PyQt6, the Qt6 Wayland platform plugin."
         echo "   Continuing with /dev/uinput setup..."
     fi
@@ -64,7 +64,8 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
-# User phase: elevate for the system phase, then venv + model. No root here.
+# User phase: elevate for the system phase, then fetch the ONNX models
+# (~8 MB total) from the OpenCV Model Zoo (Apache-2.0). No root here.
 # ---------------------------------------------------------------------------
 if [ "$(id -u)" -eq 0 ]; then
     echo "Run ./setup.sh as your regular user; it elevates itself for the"
@@ -79,27 +80,16 @@ else
     sudo "$DIR/setup.sh" --system
 fi
 
-cd "$DIR"
-# Override with e.g. PYTHON=python3.13 ./setup.sh
-PYTHON="${PYTHON:-python3}"
-
-if [ ! -d .venv ]; then
-    echo "== Creating venv (with --system-site-packages: sees system "
-    echo "   opencv/numpy/evdev/PyQt6) =="
-    "$PYTHON" -m venv --system-site-packages .venv
-fi
-
-./.venv/bin/python -m pip install --upgrade pip
-echo "== Installing PyTorch + Ultralytics =="
-# On a CUDA platform `pip install torch` pulls the GPU build automatically;
-# on others it installs the CPU build. mudra uses the GPU if one is available.
-./.venv/bin/pip install torch torchvision ultralytics
-
-MODEL="$DIR/hand_yolo11n_pose.pt"
-if [ ! -e "$MODEL" ]; then
-    echo "== Downloading hand-pose model (~6 MB) =="
-    curl -fL --retry 3 -o "$MODEL" \
-        "https://raw.githubusercontent.com/chrismuntean/YOLO11n-pose-hands/main/runs/pose/train/weights/best.pt"
-fi
+ZOO="https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models"
+for model in \
+    "palm_detection_mediapipe/palm_detection_mediapipe_2023feb.onnx" \
+    "handpose_estimation_mediapipe/handpose_estimation_mediapipe_2023feb.onnx"
+do
+    f="$DIR/$(basename "$model")"
+    if [ ! -e "$f" ]; then
+        echo "== Downloading $(basename "$model") =="
+        curl -fL --retry 3 -o "$f" "$ZOO/$model"
+    fi
+done
 
 echo "== Done. Launch with ./run.sh =="
