@@ -5,8 +5,8 @@ set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VPY="$DIR/.venv/bin/python"
 
-[ -x "$VPY" ] || { echo "No venv found. Run ./install.sh first."; exit 1; }
-[ -e "$DIR/hand_yolo11n_pose.pt" ] || { echo "No model. Run ./install.sh."; exit 1; }
+[ -x "$VPY" ] || { echo "No venv found. Run ./setup.sh first."; exit 1; }
+[ -e "$DIR/hand_yolo11n_pose.pt" ] || { echo "No model. Run ./setup.sh."; exit 1; }
 
 if id -nG | grep -qw input; then
     exec "$VPY" "$DIR/mudra.py" "$@"

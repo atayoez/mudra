@@ -205,7 +205,7 @@ class KeyListener:
 
 
 # ---------------------------------------------------------------------------
-# Screen size detection (KDE / generic), overridable with --screen.
+# Screen size detection (KDE / wlroots), overridable with --screen.
 # ---------------------------------------------------------------------------
 def detect_screen_size(override):
     """Return the *logical* desktop size (what the cursor uses), which differs
@@ -226,15 +226,14 @@ def detect_screen_size(override):
             return int(m.group(1)), int(m.group(2))
     except errs:
         pass
-    for cmd in (["wlr-randr"], ["xrandr"]):
-        try:
-            out = subprocess.check_output(cmd, text=True,
-                                          stderr=subprocess.DEVNULL, timeout=3)
-        except errs:
-            continue
+    try:  # wlroots compositors (Sway, Hyprland, ...)
+        out = subprocess.check_output(["wlr-randr"], text=True,
+                                      stderr=subprocess.DEVNULL, timeout=3)
         m = re.search(r"(\d{3,5})x(\d{3,5})", out)
         if m:
             return int(m.group(1)), int(m.group(2))
+    except errs:
+        pass
     return 1920, 1080
 
 
@@ -500,7 +499,7 @@ def build_args():
 def main():
     args = build_args()
     if not os.path.exists(args.model):
-        sys.exit(f"Missing hand model: {args.model}\nRun ./install.sh to fetch it.")
+        sys.exit(f"Missing hand model: {args.model}\nRun ./setup.sh to fetch it.")
     import cv2
     import torch
     from ultralytics import YOLO

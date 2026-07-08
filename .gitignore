@@ -1,5 +1,5 @@
 .venv/
 __pycache__/
 *.pyc
-# model weights are fetched by install.sh (AGPL-3.0, not redistributed here)
+# model weights are fetched by setup.sh (AGPL-3.0, not redistributed here)
 *.pt

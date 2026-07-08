@@ -2,11 +2,11 @@
 
 **Control your mouse with hand gestures, using just a webcam.**
 
-`mudra` is a webcam "air-mouse" for Linux. A YOLO11 hand-pose model tracks your
-hand in real time and drives the system cursor: point to move, pinch to click,
-make a fist to grab and drag. Cursor and clicks are injected through a virtual
-`evdev`/`uinput` device, so it works **natively on Wayland** (where X11 tools
-like `xdotool`/`pyautogui` can't move the real cursor) as well as on X11.
+`mudra` is a webcam "air-mouse" for Linux/Wayland. A YOLO11 hand-pose model
+tracks your hand in real time and drives the system cursor: point to move,
+pinch to click, make a fist to grab and drag. Cursor and clicks are injected
+through a virtual `evdev`/`uinput` device, so it works **natively on Wayland**
+(where X11 tools like `xdotool`/`pyautogui` can't move the real cursor).
 
 > The name comes from *mudrā* — a symbolic hand gesture/pose.
 
@@ -31,7 +31,9 @@ through PyTorch, on the **GPU** when one is available (CUDA), or CPU otherwise.
 
 ## Requirements
 
-- Linux (Wayland or X11). Built and tested on openSUSE Tumbleweed (KDE Plasma,
+- Linux on Wayland, any distro. `setup.sh` knows the package names for
+  openSUSE, Debian/Ubuntu, Fedora and Arch; others need a one-time manual
+  package install. Built and tested on openSUSE Tumbleweed (KDE Plasma,
   Wayland, aarch64) with an NVIDIA GPU, but nothing is Blackwell-specific.
 - Python 3.11+ (3.13 supported), a webcam, and access to `/dev/uinput`.
 - Optional: an NVIDIA GPU for ~30–45 fps; CPU works but slower.
@@ -41,17 +43,18 @@ through PyTorch, on the **GPU** when one is available (CUDA), or CPU otherwise.
 ```bash
 git clone https://github.com/atayozcan/mudra.git
 cd mudra
-
-# 1) system packages + /dev/uinput access (asks for your password)
-pkexec ./setup.sh
-
-# 2) Python venv (PyTorch + Ultralytics) and the hand model (~6 MB)
-./install.sh
+./setup.sh
 ```
 
-`setup.sh` is written for openSUSE (`zypper`); on other distros install the
-equivalents (python3 + venv, OpenCV python bindings, NumPy, python-evdev, PyQt6,
-the Qt6 Wayland plugin) and the udev rule it creates.
+One script does everything: system packages + `/dev/uinput` access (elevating
+itself with `pkexec`/`sudo` — asks for your password), then the Python venv
+(PyTorch + Ultralytics) and the hand model (~6 MB) as your user.
+
+`setup.sh` supports openSUSE (`zypper`), Debian/Ubuntu (`apt`), Fedora (`dnf`)
+and Arch (`pacman`). On other distros install the equivalents manually
+(python3 + venv, OpenCV python bindings, NumPy, python-evdev, PyQt6, the Qt6
+Wayland plugin), then re-run `setup.sh` — it still sets up the udev rule and
+`/dev/uinput` access.
 
 ## Run
 
