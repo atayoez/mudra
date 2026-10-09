@@ -1,0 +1,14 @@
+{
+  "name": "mudra",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Webcam hand-gesture air-mouse for Linux/Wayland",
+  "main": "electron/main.js",
+  "desktopName": "io.github.crakxx.mudra.desktop",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "45.0.0-alpha.14"
+  }
+}

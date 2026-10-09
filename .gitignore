@@ -2,3 +2,7 @@ __pycache__/
 *.pyc
 # model weights are fetched by setup.sh
 *.onnx
+
+# local Electron runtime
+node_modules/
+npm-debug.log*

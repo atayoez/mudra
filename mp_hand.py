@@ -192,13 +192,15 @@ class MPHandPose:
             return None
 
         landmarks = landmarks[0].reshape(-1, 3)  # (63,) -> (21, 3)
-        # crop coords -> rotated-frame coords
+        # crop coords -> rotated-frame coords. Keep MediaPipe's relative Z;
+        # OpenCV Model Zoo scales it by the same hand-crop factor as X/Y.
         wh_rotated_palm_bbox = rotated_palm_bbox[1] - rotated_palm_bbox[0]
         scale_factor = wh_rotated_palm_bbox / self.input_size
-        landmarks = ((landmarks[:, :2] - self.input_size / 2)
-                     * max(scale_factor))
+        xy = ((landmarks[:, :2] - self.input_size / 2)
+              * max(scale_factor))
+        z = landmarks[:, 2] * max(scale_factor)
         coords_rotation_matrix = cv.getRotationMatrix2D((0, 0), angle, 1.0)
-        rotated_landmarks = np.dot(landmarks, coords_rotation_matrix[:, :2])
+        rotated_xy = np.dot(xy, coords_rotation_matrix[:, :2])
         # undo the rotation to get original-frame coords
         rotation_component = np.array([
             [rotation_matrix[0][0], rotation_matrix[1][0]],
@@ -214,7 +216,8 @@ class MPHandPose:
         original_center = np.array([
             np.dot(center, inverse_rotation_matrix[0]),
             np.dot(center, inverse_rotation_matrix[1])])
-        kp = rotated_landmarks + original_center + pad_bias
+        kp_xy = rotated_xy + original_center + pad_bias
+        kp = np.c_[kp_xy, z]
         return kp.astype(np.float32), conf
 
 
@@ -222,6 +225,6 @@ def palm_from_landmarks(kp):
     """Build a palm row for MPHandPose.infer() from the previous frame's 21
     landmarks, so tracking can continue without re-running palm detection
     (the same trick the MediaPipe pipeline uses)."""
-    pts = kp[list(MPHandPose.PALM_LANDMARK_IDS)]
+    pts = kp[list(MPHandPose.PALM_LANDMARK_IDS), :2]
     bbox = np.r_[pts.min(axis=0), pts.max(axis=0)]
     return np.r_[bbox, pts.reshape(-1), 1.0].astype(np.float32)

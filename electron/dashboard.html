@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="de" data-text-size="large">
+<head>
+  <meta charset="utf-8">
+  <meta
+    http-equiv="Content-Security-Policy"
+    content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; frame-src 'none'; form-action 'none'"
+  >
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mudra – Einstellungen</title>
+  <link rel="stylesheet" href="dashboard.css">
+</head>
+<body>
+  <a class="skip-link" href="#settings">Direkt zu den Einstellungen</a>
+
+  <header class="page-header">
+    <div>
+      <p class="eyebrow">MUDRA · EINSTELLUNGEN</p>
+      <h1>Handsteuerung gut lesbar einstellen</h1>
+      <p class="lead">
+        Alle Werte werden live übernommen und gespeichert. Große Schrift,
+        klare Erklärungen und vollständige Tastaturbedienung sind Standard.
+      </p>
+    </div>
+
+    <div class="accessibility-toolbar" aria-label="Darstellung">
+      <span class="toolbar-label">Textgröße</span>
+      <button type="button" data-text-size="normal">Groß</button>
+      <button type="button" data-text-size="large">Sehr groß</button>
+      <button type="button" data-text-size="xlarge">Extra groß</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="status-panel" aria-labelledby="status-heading">
+      <h2 id="status-heading">Status</h2>
+      <p id="connection-status" class="status-text" role="status" aria-live="polite">
+        Dashboard wird verbunden …
+      </p>
+      <p class="status-note">
+        Startparameter wie <code>--scroll-speed</code> überschreiben gespeicherte
+        Werte beim Start. Änderungen hier gelten sofort.
+      </p>
+    </section>
+
+    <section class="reading-help" aria-labelledby="reading-heading">
+      <h2 id="reading-heading">So liest du die Regler</h2>
+      <p>
+        Jeder Wert erklärt direkt, was ein <strong>kleinerer</strong> und ein
+        <strong>größerer</strong> Wert bewirkt. Wenn etwas schlechter wird,
+        kannst du jederzeit die Standardwerte wiederherstellen.
+      </p>
+      <button id="reset-settings" class="secondary-button" type="button">
+        Alle Werte auf Standard zurücksetzen
+      </button>
+    </section>
+
+    <section id="settings" aria-labelledby="settings-heading">
+      <h2 id="settings-heading">Einstellungen</h2>
+      <div id="settings-container"></div>
+    </section>
+  </main>
+
+  <footer>
+    <p>
+      Hinweis: Das Dashboard läuft nur lokal. Es lädt keine Webseiten und
+      bekommt nur Zugriff auf ausdrücklich freigegebene Mudra-Einstellungen.
+    </p>
+  </footer>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
